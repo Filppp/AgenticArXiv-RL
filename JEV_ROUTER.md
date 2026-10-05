@@ -126,6 +126,31 @@ task + state + available tools
 - 明确出现在请求里的参数不会经过一次不必要的语言模型“转述”；
 - 低 confidence、网络失败、未知工具、schema 错误和业务非法参数都有明确回退或拦截路径。
 
+### 确定性参数覆盖范围
+
+解析器按工具分工，只接管**请求里已经明确写出**的参数：
+
+| 工具 | 由代码接管的显式参数 |
+| --- | --- |
+| `search_arxiv_papers` | `query`（显式 `all:` / `ti:` / `au:` 字段）、`days`、`max_results` |
+| `get_recently_submitted_cs_papers` | `aspect`、`days`、`max_results` |
+| `download_arxiv_pdf` | `ref`、`force` |
+| `translate_arxiv_pdf` | `ref`、`service`、`force`、`threads`、`keep_dual` |
+| `get_paper_cache_status` / `extract_paper_figures` | `ref` |
+| `get_paper_content` | `ref`、`section` |
+| `summarize_paper` | `ref`、`style`、`max_words` |
+| `analyze_figure` | `ref`、`figure_no`、`question` |
+| `get_translated_content` | `ref`、`page` |
+
+`ref` 的三种显式写法（序号「第N篇」、arXiv ID、「刚才那篇」式活跃指代）与其它论文
+工具共用同一套解析。`get_translated_content` 独有 `page`，口径与工具本身一致：**请求没
+提页数时不写 `page`**，由工具默认第 1 页生效；提到「第2页和第3页」这类列举、
+「第2-3页」这类区间或非法的「第0页」时，整个动作交回策略模型——退回默认第 1 页会是
+一个自信的错误参数，比交给模型更糟。
+
+`v3_81` / `v7_86` 的 5 条 `translation_reading` 任务里有 4 条因此走确定性参数；
+`trread_ai5_null_page3` 的「刚才翻译好的那篇」不在活跃指代词表内，仍按含糊指代交回策略。
+
 ## 优势区间
 
 为避免偶然性，还从先前 trace 中预选了 6 个“Jev 高置信度选对、

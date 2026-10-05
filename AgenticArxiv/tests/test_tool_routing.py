@@ -298,6 +298,93 @@ def test_guided_router_uses_deterministic_explicit_args_without_qwen_call():
     assert route["argument_source"] == "deterministic"
 
 
+# ---------------------------------------------------------------------------
+# 读译文族：guided 模式下 ref 与 page 都由代码接管
+# ---------------------------------------------------------------------------
+
+def _translated_reader_agent(client, router):
+    """读译文族的 guided 用例共用 ReActAgent：工具 schema 由真实 registry 提供。"""
+    environment = _Environment()
+    agent = ReActAgent(
+        client,
+        side_effect_mgr=LocalSideEffectManager(),
+        env=environment,
+        max_iterations=3,
+        tool_router=router,
+        router_argument_mode="guided",
+    )
+    return agent, environment
+
+
+def _translated_reader_router():
+    return _Router(
+        [
+            RouteDecision(
+                selected_tool="get_translated_content",
+                confidence=0.99,
+                accepted=True,
+                source="jev",
+            ),
+            RouteDecision(
+                selected_tool="FINISH",
+                confidence=0.99,
+                accepted=True,
+                source="jev",
+            ),
+        ]
+    )
+
+
+def test_guided_router_resolves_translated_page_without_qwen_call():
+    """「读第2页」是显式参数：不该再花一次本地 Qwen 去生成 args。"""
+    client = _TextClient([])
+    agent, environment = _translated_reader_agent(
+        client, _translated_reader_router()
+    )
+
+    result = agent.run("打开第1篇论文的中文译文，读第2页")
+
+    assert client.calls == []
+    assert environment.calls == [
+        (
+            "get_translated_content",
+            # session_id 由侧效应层注入，属于框架行为而非路由结果。
+            {"ref": 1, "page": 2, "session_id": "default"},
+        )
+    ]
+    route = result["routing"]["decisions"][0]
+    assert route["used"] is True
+    assert route["argument_resolution"] == "resolved"
+    assert route["argument_source"] == "deterministic"
+
+
+def test_guided_router_defers_an_ambiguous_page_to_the_policy():
+    """「第2页和第3页」不是确定参数：整个动作交回策略模型自己决定。"""
+    client = _TextClient(
+        [
+            'Thought: 只读第2页\nAction: {"name":"get_translated_content",'
+            '"args":{"ref":1,"page":2}}'
+        ]
+    )
+    agent, environment = _translated_reader_agent(
+        client, _translated_reader_router()
+    )
+
+    result = agent.run("读第1篇译文的第2页和第3页")
+
+    assert len(client.calls) == 1
+    assert environment.calls == [
+        (
+            "get_translated_content",
+            # session_id 由侧效应层注入，属于框架行为而非路由结果。
+            {"ref": 1, "page": 2, "session_id": "default"},
+        )
+    ]
+    route = result["routing"]["decisions"][0]
+    assert route["argument_resolution"] == "defer"
+    assert route["argument_resolution_reason"] == "translated_page_ambiguous"
+
+
 def test_guided_router_blocks_non_positive_reference_without_tool_or_qwen_call():
     router = _Router(
         [

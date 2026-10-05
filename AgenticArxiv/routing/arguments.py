@@ -23,6 +23,11 @@ class RoutedArgumentResolution:
 
 _ARXIV_ID = re.compile(r"\b\d{4}\.\d{4,5}(?:v\d+)?\b", re.IGNORECASE)
 _ORDINAL = re.compile(r"第\s*(\d+)\s*篇")
+#: ``get_translated_content`` addresses a translated PDF by page, so the only
+#: explicit page wording the tasks use is「第 N 页」. Matched with ``findall``
+#: on purpose: several hits mean the request is a range or a list, which is
+#: exactly the ambiguous case that must stay with the policy model.
+_PAGE = re.compile(r"第\s*(\d+)\s*页")
 _QUERY = re.compile(
     r"\b(?:all|ti|au):\s*[^，,。；;\n]+", re.IGNORECASE
 )
@@ -78,6 +83,9 @@ def resolve_routed_arguments(
         "summarize_paper",
         "extract_paper_figures",
         "analyze_figure",
+        # 读译文与其它论文工具共用同一套 ref 解析（序号 / arXiv ID / 最近一篇），
+        # 额外多一个按页寻址的显式参数。
+        "get_translated_content",
     }:
         reference = _next_reference(clean_task, used_refs)
         if reference.status == "complete":
@@ -127,9 +135,41 @@ def resolve_routed_arguments(
                 if marker in clean_task.lower():
                     args["question"] = value
                     break
+        elif tool_name == "get_translated_content":
+            page = _resolve_page(clean_task)
+            if page.status != "resolved":
+                # 页数含糊（第2页和第3页）或非法（第0页）：整个动作交回策略，
+                # 而不是用默认页 1 猜一个确定性参数。
+                return page
+            args.update(page.args)
         return _resolved(args, "explicit_reference_and_options")
 
     return _defer("unsupported_tool")
+
+
+def _resolve_page(task: str) -> RoutedArgumentResolution:
+    """Resolve an explicit single page request for the translated reader.
+
+    ``get_translated_content`` defaults to page 1, so a task that never names a
+    page resolves to ``{}`` and the tool's own default applies.  Anything else
+    that still talks about pages is treated as ambiguous or illegal — a list
+    (``第2页和第3页``), a range (``第2-3页``) or ``第0页`` — and defers, because
+    silently falling back to page 1 there would inject a confidently wrong
+    deterministic argument.
+    """
+    pages = {int(value) for value in _PAGE.findall(task)}
+    if not pages:
+        # A range has no standalone「第N页」，but the task did ask for a specific
+        # page, so the tool default must not quietly stand in for it.
+        if "页" in task:
+            return _defer("translated_page_not_single")
+        return _resolved({}, "page_defaulted")
+    if len(pages) > 1:
+        return _defer("translated_page_ambiguous")
+    page = pages.pop()
+    if page < 1:
+        return _defer("translated_page_not_positive")
+    return _resolved({"page": page}, "explicit_page")
 
 
 def _next_reference(task: str, used_refs: List[Any]) -> RoutedArgumentResolution:
